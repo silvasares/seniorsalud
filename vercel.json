@@ -1,0 +1,6 @@
+{
+  "buildCommand": "flutter build web --release",
+  "outputDirectory": "build/web",
+  "installCommand": "npm install -g flutter-web-cli && flutter pub get",
+  "framework": null
+}
