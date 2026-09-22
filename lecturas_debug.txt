@@ -1,0 +1,14 @@
+﻿
+                              'Registra al menos 2 lecturas para ver la evoluciÃ³n',
+                      'Ãšltimas lecturas',
+                        ? Center(child: Text('No hay lecturas registradas', style: GoogleFonts.lexend(fontSize: 18, 
+color: Colors.grey)))
+                'Todas las Lecturas',
+                    'Mostrando lecturas de: ${_allUsers.firstWhere((u) => u['id'] == _selectedUserId, orElse: () => 
+{'name': 'Desconocido'})['name']}',
+                          ? 'No hay lecturas registradas'
+                          : 'Este usuario no tiene lecturas de $_adminReadingFilter',
+            title: Text('Lecturas', style: GoogleFonts.lexend()),
+      return const Center(child: Text('Se necesitan al menos 2 lecturas'));
+
+
