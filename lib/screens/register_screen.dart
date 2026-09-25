@@ -19,19 +19,41 @@ class _RegisterScreenState extends State<RegisterScreen> {
   final _passwordController = TextEditingController();
 
   Future<void> _register() async {
+    final name = _nameController.text.trim();
+    final username = _usernameController.text.trim();
+    final phone = _phoneController.text.trim();
+    final password = _passwordController.text;
+
+    String? invalidReason;
+    if (name.isEmpty || username.isEmpty) {
+      invalidReason = 'Nombre y usuario son obligatorios.';
+    } else if (password.isEmpty) {
+      invalidReason = 'La contraseña no puede estar vacía.';
+    } else if (phone.isEmpty) {
+      invalidReason = 'El teléfono de contacto es obligatorio.';
+    }
+    if (invalidReason != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(invalidReason)),
+      );
+      return;
+    }
+
     final auth = context.read<AuthProvider>();
     final result = await auth.register(
-      name: _nameController.text.trim(),
-      username: _usernameController.text.trim(),
-      phone: _phoneController.text.trim(),
-      password: _passwordController.text.trim(),
+      name: name,
+      username: username,
+      phone: phone,
+      password: password,
     );
 
     if (!mounted) return;
 
     if (result.isSuccess) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Registro enviado. Pendiente de aprobación.')),
+        const SnackBar(
+          content: Text('Solicitud enviada. El administrador revisará tu alta antes de que puedas iniciar sesión.'),
+        ),
       );
       Navigator.pop(context);
     } else if (result.error != null) {

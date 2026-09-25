@@ -46,6 +46,7 @@ class AppUser {
   bool get isAdmin => role == 'admin';
   bool get isPending => status == 'pending';
   bool get isApproved => status == 'approved';
+  bool get isRejected => status == 'rejected';
 }
 
 class AuthResult {

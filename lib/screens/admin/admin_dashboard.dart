@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:provider/provider.dart';
 import '../../constants/app_colors.dart';
+import '../../providers/auth_provider.dart';
+import '../login_screen.dart';
 import 'admin_stats_tab.dart';
 import 'admin_users_tab.dart';
 import 'admin_calendar_tab.dart';
@@ -17,9 +20,34 @@ class AdminDashboard extends StatefulWidget {
 
 class _AdminDashboardState extends State<AdminDashboard> {
   int _selectedIndex = 0;
+  bool _redirected = false;
+
+  Future<void> _logout() async {
+    await context.read<AuthProvider>().logout();
+    if (!mounted) return;
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (context) => const LoginScreen()),
+      (route) => false,
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
+    final auth = context.watch<AuthProvider>();
+    if (!auth.isAdmin) {
+      if (!_redirected) {
+        _redirected = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          Navigator.of(context).pushAndRemoveUntil(
+            MaterialPageRoute(builder: (context) => const LoginScreen()),
+            (route) => false,
+          );
+        });
+      }
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+
     final List<String> titles = [
       'Panel', 'Pendientes', 'Usuarios', 'Citas', 'Lecturas', 'Mensajes',
     ];
@@ -40,6 +68,13 @@ class _AdminDashboardState extends State<AdminDashboard> {
         elevation: 0,
         automaticallyImplyLeading: false,
         iconTheme: const IconThemeData(color: Colors.black87),
+        actions: [
+          IconButton(
+            tooltip: 'Cerrar sesión',
+            icon: const Icon(Icons.logout),
+            onPressed: _logout,
+          ),
+        ],
       ),
       bottomNavigationBar: Container(
         decoration: BoxDecoration(

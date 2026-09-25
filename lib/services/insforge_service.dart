@@ -1,15 +1,68 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 
+class InsForgeRpcException implements Exception {
+  final int statusCode;
+  final String message;
+  InsForgeRpcException(this.statusCode, this.message);
+
+  @override
+  String toString() => message;
+}
+
+class AuthSession {
+  final String userId;
+  final String accessToken;
+  final String refreshToken;
+  AuthSession({required this.userId, required this.accessToken, required this.refreshToken});
+}
+
 class InsForgeService {
   static const String _baseUrl = 'https://espy9at2.us-east.insforge.app';
   static const String _apiKey = 'anon_23efa288ab9f4b85ae94a3ad53e05ba5b14b331d8ac5cb3b5bce7d4f5c70c681';
 
-  Map<String, String> get _headers => {
+  // Sesion activa: cuando hay token de usuario, las llamadas viajan como
+  // authenticated y el RLS solo deja ver los datos propios (o todos si es admin).
+  static String? _accessToken;
+  static String? _refreshToken;
+  static DateTime? _tokenIssuedAt;
+
+  static String? get accessToken => _accessToken;
+  static String? get refreshToken => _refreshToken;
+
+  static void setSession({required String accessToken, required String refreshToken}) {
+    _accessToken = accessToken;
+    _refreshToken = refreshToken;
+    _tokenIssuedAt = DateTime.now();
+  }
+
+  static void clearSession() {
+    _accessToken = null;
+    _refreshToken = null;
+    _tokenIssuedAt = null;
+  }
+
+  // El access token dura ~15 min: lo renovamos antes de cada tanda de
+  // llamadas para que la sesion no caduque con la app abierta.
+  Future<void> _ensureFreshSession() async {
+    final issued = _tokenIssuedAt;
+    if (_accessToken == null || issued == null) return;
+    if (DateTime.now().difference(issued) < const Duration(minutes: 10)) return;
+    await refreshSession();
+  }
+
+  Map<String, String> get _anonHeaders => {
     'Content-Type': 'application/json',
     'apikey': _apiKey,
     'Authorization': 'Bearer $_apiKey',
   };
+
+  Map<String, String> get _headers => {
+    'Content-Type': 'application/json',
+    'apikey': _apiKey,
+    'Authorization': 'Bearer ${_accessToken ?? _apiKey}',
+  };
+
 
   // Build query params from PostgREST-style filters
   Map<String, String> _buildParams({
@@ -43,6 +96,7 @@ class InsForgeService {
     int? limit,
   }) async {
     try {
+      await _ensureFreshSession();
       final params = _buildParams(
         select: select,
         filters: filters,
@@ -73,26 +127,28 @@ class InsForgeService {
   // Generic POST to insert a record
   Future<bool> _insert(String table, Map<String, dynamic> data) async {
     try {
+      await _ensureFreshSession();
       final response = await http.post(
         Uri.parse('$_baseUrl/api/database/records/$table'),
         headers: _headers,
         body: jsonEncode(data),
       );
-      return response.statusCode == 200 || response.statusCode == 201;
+      return response.statusCode >= 200 && response.statusCode < 300;
     } catch (e) {
       print('Insert error on $table: $e');
       return false;
     }
   }
 
-  // Generic PUT to update records
+  // Generic PATCH to update records
   Future<bool> _update(String table, Map<String, dynamic> data, Map<String, String> filters) async {
     try {
+      await _ensureFreshSession();
       final params = _buildParams(filters: filters);
       final uri = Uri.parse('$_baseUrl/api/database/records/$table')
           .replace(queryParameters: params);
-      final response = await http.put(uri, headers: _headers, body: jsonEncode(data));
-      return response.statusCode == 200;
+      final response = await http.patch(uri, headers: _headers, body: jsonEncode(data));
+      return response.statusCode >= 200 && response.statusCode < 300;
     } catch (e) {
       print('Update error on $table: $e');
       return false;
@@ -102,37 +158,183 @@ class InsForgeService {
   // Generic DELETE
   Future<bool> _delete(String table, Map<String, String> filters) async {
     try {
+      await _ensureFreshSession();
       final params = _buildParams(filters: filters);
       final uri = Uri.parse('$_baseUrl/api/database/records/$table')
           .replace(queryParameters: params);
       final response = await http.delete(uri, headers: _headers);
-      return response.statusCode == 200;
+      return response.statusCode >= 200 && response.statusCode < 300;
     } catch (e) {
       print('Delete error on $table: $e');
       return false;
     }
   }
 
-  // RPC call
+  // RPC call: lanza InsForgeRpcException si el servidor responde con error.
   Future<dynamic> _rpc(String functionName, [Map<String, dynamic>? params]) async {
-    try {
-      final response = await http.post(
+    await _ensureFreshSession();
+    var response = await http.post(
+      Uri.parse('$_baseUrl/api/database/rpc/$functionName'),
+      headers: _headers,
+      body: jsonEncode(params ?? {}),
+    );
+
+    // Si el access token vencio, lo renovamos y reintentamos una vez.
+    if (response.statusCode == 401 && _accessToken != null && await refreshSession()) {
+      response = await http.post(
         Uri.parse('$_baseUrl/api/database/rpc/$functionName'),
         headers: _headers,
         body: jsonEncode(params ?? {}),
       );
-      if (response.statusCode == 200) {
+    }
+
+    if (response.statusCode >= 200 && response.statusCode < 300) {
+      if (response.body.isEmpty) return null;
+      try {
         return jsonDecode(response.body);
+      } catch (_) {
+        return null;
       }
-      print('RPC error on $functionName: ${response.statusCode} ${response.body}');
-      return null;
+    }
+
+    String message = 'Error del servidor (${response.statusCode})';
+    try {
+      final decoded = jsonDecode(response.body);
+      if (decoded is Map) {
+        message = (decoded['message'] ?? decoded['error'] ?? message).toString();
+      }
+    } catch (_) {
+      if (response.body.isNotEmpty) message = response.body;
+    }
+    throw InsForgeRpcException(response.statusCode, message);
+  }
+
+  // === AUTH (InsForge) ===
+
+  String _emailForUsername(String username) =>
+      '${username.trim().toLowerCase()}@seniorsalud.app';
+
+  Future<AuthSession?> signIn(String username, String password) async {
+    try {
+      final response = await http.post(
+        Uri.parse('$_baseUrl/api/auth/sessions?client_type=mobile'),
+        headers: _anonHeaders,
+        body: jsonEncode({'email': _emailForUsername(username), 'password': password}),
+      );
+      if (response.statusCode != 200) return null;
+
+      final data = jsonDecode(response.body);
+      final accessToken = data['accessToken'] as String?;
+      final refreshToken = data['refreshToken'] as String?;
+      final userId = data['user']?['id'] as String?;
+      if (accessToken == null || userId == null) return null;
+
+      setSession(accessToken: accessToken, refreshToken: refreshToken ?? '');
+      return AuthSession(
+        userId: userId,
+        accessToken: accessToken,
+        refreshToken: refreshToken ?? '',
+      );
     } catch (e) {
-      print('RPC error on $functionName: $e');
+      print('Error signing in: $e');
       return null;
     }
   }
 
+  Future<bool> refreshSession() async {
+    final current = _refreshToken;
+    if (current == null || current.isEmpty) return false;
+    try {
+      final response = await http.post(
+        Uri.parse('$_baseUrl/api/auth/refresh?client_type=mobile'),
+        headers: _anonHeaders,
+        body: jsonEncode({'refresh_token': current}),
+      );
+      if (response.statusCode != 200) return false;
+
+      final data = jsonDecode(response.body);
+      final accessToken = data['accessToken'] as String?;
+      final refreshToken = data['refreshToken'] as String? ?? current;
+      if (accessToken == null) return false;
+
+      setSession(accessToken: accessToken, refreshToken: refreshToken);
+      return true;
+    } catch (e) {
+      print('Error refreshing session: $e');
+      return false;
+    }
+  }
+
+  // Refresca usando una sesion guardada (SharedPreferences) sin login previo.
+  static Future<bool> restoreSession(String refreshToken) async {
+    if (refreshToken.isEmpty) return false;
+    try {
+      final response = await http.post(
+        Uri.parse('$_baseUrl/api/auth/refresh?client_type=mobile'),
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': _apiKey,
+          'Authorization': 'Bearer $_apiKey',
+        },
+        body: jsonEncode({'refresh_token': refreshToken}),
+      );
+      if (response.statusCode != 200) return false;
+
+      final data = jsonDecode(response.body);
+      final accessToken = data['accessToken'] as String?;
+      final newRefresh = data['refreshToken'] as String? ?? refreshToken;
+      if (accessToken == null) return false;
+
+      setSession(accessToken: accessToken, refreshToken: newRefresh);
+      return true;
+    } catch (e) {
+      print('Error restoring session: $e');
+      return false;
+    }
+  }
+
+  Future<void> signOut() async {
+    final token = _accessToken;
+    try {
+      if (token != null) {
+        await http.post(
+          Uri.parse('$_baseUrl/api/auth/logout?client_type=mobile'),
+          headers: {
+            'Content-Type': 'application/json',
+            'apikey': _apiKey,
+            'Authorization': 'Bearer $token',
+          },
+        );
+      }
+    } catch (e) {
+      print('Error signing out: $e');
+    }
+    clearSession();
+  }
+
+
   // === USERS ===
+
+  // Self-registration: always creates a pending patient (role/status forced server-side).
+  Future<Map<String, dynamic>?> registerUser({
+    required String name,
+    required String username,
+    required String phone,
+    required String password,
+    int? age,
+  }) async {
+    final response = await _rpc('register_user', {
+      'p_name': name,
+      'p_username': username,
+      'p_phone': phone,
+      'p_password': password,
+      'p_age': age,
+    });
+    if (response is Map) {
+      return Map<String, dynamic>.from(response);
+    }
+    return null;
+  }
 
   Future<Map<String, dynamic>?> createUser({
     required String name,
@@ -141,6 +343,7 @@ class InsForgeService {
     required String password,
     int? age,
     bool approved = true,
+    String role = 'patient',
   }) async {
     final response = await _rpc('admin_create_user', {
       'p_name': name,
@@ -149,7 +352,7 @@ class InsForgeService {
       'p_password': password,
       'p_age': age,
       'p_status': approved ? 'approved' : 'pending',
-      'p_role': 'patient',
+      'p_role': role,
     });
     if (response is Map) {
       return Map<String, dynamic>.from(response);
@@ -167,22 +370,6 @@ class InsForgeService {
     }
   }
 
-  Future<Map<String, dynamic>?> getUserByUsernameAndPassword(String username, String password) async {
-    try {
-      final response = await _rpc('login_user', {
-        'p_username': username,
-        'p_password': password,
-      });
-      if (response != null) {
-        return Map<String, dynamic>.from(response as Map);
-      }
-      return null;
-    } catch (e) {
-      print('Error getting user: $e');
-      return null;
-    }
-  }
-
   Future<Map<String, dynamic>?> getUserProfile(String userId) async {
     try {
       final response = await _select('users', filters: {'id': 'eq.$userId'}, limit: 1);
@@ -196,23 +383,18 @@ class InsForgeService {
     }
   }
 
-  Future<void> signOut() async {
-    return;
-  }
-
   Future<bool> updateUser({
     required String userId,
     required String name,
     required String username,
     required String phone,
-    required String password,
+    String? password,
     int? age,
   }) async {
     return _update('users', {
       'name': name,
       'username': username,
       'phone': phone,
-      'password': password,
       if (age != null) 'age': age,
     }, {'id': 'eq.$userId'});
   }
@@ -233,14 +415,23 @@ class InsForgeService {
       'phone': phone,
       'role': role,
       'status': status,
-      if (password != null && password.isNotEmpty) 'password': password,
       if (age != null) 'age': age,
     };
-    return _update('users', updates, {'id': 'eq.$userId'});
+    final updated = await _update('users', updates, {'id': 'eq.$userId'});
+    if (!updated) return false;
+
+    // La contrasena se guarda hasheada en la cuenta de autenticacion.
+    if (password != null && password.isNotEmpty) {
+      await _rpc('admin_set_user_password', {
+        'p_user_id': userId,
+        'p_password': password,
+      });
+    }
+    return true;
   }
 
   Future<bool> deleteUser(String userId) async {
-    return _delete('users', {'id': 'eq.$userId'});
+    return adminDeleteUser(userId);
   }
 
   Future<List<Map<String, dynamic>>> _fetchUsers() async {
@@ -264,6 +455,10 @@ class InsForgeService {
     return [];
   }
 
+  Future<List<Map<String, dynamic>>> getAllUsers() async {
+    return _fetchUsers();
+  }
+
   Future<List<Map<String, dynamic>>> getPendingUsers() async {
     final users = await _fetchUsers();
     return users.where((u) => u['status'] == 'pending').toList();
@@ -272,10 +467,6 @@ class InsForgeService {
   Future<List<Map<String, dynamic>>> getApprovedUsers() async {
     final users = await _fetchUsers();
     return users.where((u) => u['status'] == 'approved').toList();
-  }
-
-  Future<bool> updateUserStatus(String userId, String status) async {
-    return false;
   }
 
   Future<bool> adminUpdateUserStatus(String userId, String status) async {

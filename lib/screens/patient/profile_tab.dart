@@ -90,8 +90,14 @@ class _ProfileTabState extends State<ProfileTab> {
               ProfileInfoItem(
                 icon: Icons.check_circle_outline,
                 label: 'Estado de Cuenta',
-                value: 'Activo',
-                valueColor: Colors.green,
+                value: user?.isApproved ?? false
+                    ? 'Activo'
+                    : (user?.isPending ?? false
+                        ? 'Pendiente de aprobación'
+                        : 'Rechazada'),
+                valueColor: (user?.isPending ?? false)
+                    ? Colors.orange
+                    : (user?.isRejected ?? false ? Colors.red : Colors.green),
               ),
               const SizedBox(height: 40),
               ElevatedButton(

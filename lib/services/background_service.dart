@@ -22,10 +22,15 @@ void callbackDispatcher() {
       final userId = prefs.getString(_userIdKey);
       if (userId == null || userId.isEmpty) return Future.value(false);
 
+      // Los datos estan protegidos por RLS: hace falta una sesion valida.
+      final refreshToken = prefs.getString('bg_refresh_token') ?? '';
+      final accessToken = await _refreshAccessToken(refreshToken);
+      if (accessToken == null) return Future.value(false);
+
       final headers = {
         'Content-Type': 'application/json',
         'apikey': _apiKey,
-        'Authorization': 'Bearer $_apiKey',
+        'Authorization': 'Bearer $accessToken',
       };
 
       final uri = Uri.parse('$_baseUrl/api/database/records/health_alerts')
@@ -92,6 +97,36 @@ Future<void> _initNotifications() async {
   const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
   const initSettings = InitializationSettings(android: androidSettings);
   await _notifPlugin.initialize(initSettings);
+}
+
+Future<String?> _refreshAccessToken(String refreshToken) async {
+  if (refreshToken.isEmpty) return null;
+  try {
+    final response = await http.post(
+      Uri.parse('$_baseUrl/api/auth/refresh?client_type=mobile'),
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': _apiKey,
+        'Authorization': 'Bearer $_apiKey',
+      },
+      body: jsonEncode({'refresh_token': refreshToken}),
+    );
+    if (response.statusCode != 200) return null;
+
+    final data = jsonDecode(response.body);
+    final accessToken = data['accessToken'] as String?;
+    final newRefresh = data['refreshToken'] as String?;
+    if (accessToken == null) return null;
+
+    if (newRefresh != null && newRefresh != refreshToken) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('bg_refresh_token', newRefresh);
+    }
+    return accessToken;
+  } catch (e) {
+    print('Background refresh error: $e');
+    return null;
+  }
 }
 
 String _titleForType(String type) {

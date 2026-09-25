@@ -31,13 +31,12 @@ class _AdminUsersTabState extends State<AdminUsersTab> {
 
   Future<void> _load() async {
     try {
-      final approved = await _service.getApprovedUsers();
-      final pending = await _service.getPendingUsers();
+      final all = await _service.getAllUsers();
       if (mounted) {
         setState(() {
           _users = widget.showOnlyPending
-              ? pending
-              : [...pending, ...approved];
+              ? all.where((u) => u['status'] == 'pending').toList()
+              : all;
           _isLoading = false;
         });
       }
@@ -47,6 +46,58 @@ class _AdminUsersTabState extends State<AdminUsersTab> {
       }
     }
   }
+
+  Future<void> _confirmDelete(Map<String, dynamic> user) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text('Eliminar usuario'),
+        content: Text(
+          '¿Seguro que quieres eliminar a @${user['username'] ?? ''}? '
+          'Se borrarán también sus lecturas, alertas, citas y medicamentos.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancelar'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Eliminar', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    final success = await _service.adminDeleteUser(user['id']);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(success ? 'Usuario eliminado.' : 'Error al eliminar el usuario.')),
+    );
+    if (success) _load();
+  }
+
+  Future<void> _setStatus(Map<String, dynamic> user, String status) async {
+    final label = status == 'approved' ? 'aprobada' : 'rechazada';
+    final success = await _service.adminUpdateUserStatus(user['id'], status);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(success
+            ? 'Solicitud de @${user['username'] ?? ''} $label.'
+            : 'Error al actualizar el estado.'),
+      ),
+    );
+    if (success) _load();
+  }
+
+  static const _statusItems = [
+    DropdownMenuItem(value: 'approved', child: Text('Aprobado')),
+    DropdownMenuItem(value: 'pending', child: Text('Pendiente')),
+    DropdownMenuItem(value: 'rejected', child: Text('Rechazado')),
+  ];
 
   void _showCreateUserDialog() {
     final nameC = TextEditingController();
@@ -119,10 +170,7 @@ class _AdminUsersTabState extends State<AdminUsersTab> {
                             child: DropdownButtonHideUnderline(
                               child: DropdownButton<String>(
                                 value: status,
-                                items: const [
-                                  DropdownMenuItem(value: 'approved', child: Text('Aprobado')),
-                                  DropdownMenuItem(value: 'pending', child: Text('Pendiente')),
-                                ],
+                                items: _statusItems,
                                 onChanged: (val) { if (val != null) setDialogState(() => status = val); },
                               ),
                             ),
@@ -142,10 +190,19 @@ class _AdminUsersTabState extends State<AdminUsersTab> {
                       return;
                     }
                     showDialog(context: context, barrierDismissible: false, builder: (c) => const Center(child: CircularProgressIndicator()));
-                    final result = await _service.createUser(
-                      name: nameC.text.trim(), username: usernameC.text.trim(), phone: phoneC.text.trim(),
-                      password: passwordC.text.trim(), age: int.tryParse(ageC.text.trim()), approved: status == 'approved',
-                    );
+                    String? error;
+                    Map<String, dynamic>? result;
+                    try {
+                      result = await _service.createUser(
+                        name: nameC.text.trim(), username: usernameC.text.trim(), phone: phoneC.text.trim(),
+                        password: passwordC.text.trim(), age: int.tryParse(ageC.text.trim()),
+                        approved: status == 'approved', role: role,
+                      );
+                    } on InsForgeRpcException catch (e) {
+                      error = e.message;
+                    } catch (e) {
+                      error = 'Error de conexion.';
+                    }
                     if (context.mounted) {
                       Navigator.pop(context);
                       Navigator.pop(context);
@@ -153,7 +210,9 @@ class _AdminUsersTabState extends State<AdminUsersTab> {
                         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Usuario creado con exito.')));
                         _load();
                       } else {
-                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Error al crear el usuario.')));
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text(error ?? 'Error al crear el usuario.')),
+                        );
                       }
                     }
                   },
@@ -173,6 +232,7 @@ class _AdminUsersTabState extends State<AdminUsersTab> {
     final usernameC = TextEditingController(text: user['username']);
     final phoneC = TextEditingController(text: user['phone']);
     final passwordC = TextEditingController();
+    final ageC = TextEditingController(text: user['age']?.toString() ?? '');
     String role = user['role'] ?? 'patient';
     String status = user['status'] ?? 'approved';
 
@@ -197,6 +257,8 @@ class _AdminUsersTabState extends State<AdminUsersTab> {
                 AppInputField(controller: phoneC, hint: 'Telefono', icon: Icons.phone),
                 const SizedBox(height: 15),
                 AppInputField(controller: passwordC, hint: 'Nueva Contrasena (opcional)', icon: Icons.lock, isObscure: true),
+                const SizedBox(height: 15),
+                AppInputField(controller: ageC, hint: 'Edad (opcional)', icon: Icons.cake),
                 const SizedBox(height: 20),
                 Row(
                   children: [
@@ -236,10 +298,7 @@ class _AdminUsersTabState extends State<AdminUsersTab> {
                             child: DropdownButtonHideUnderline(
                               child: DropdownButton<String>(
                                 value: status,
-                                items: const [
-                                  DropdownMenuItem(value: 'approved', child: Text('Aprobado')),
-                                  DropdownMenuItem(value: 'pending', child: Text('Pendiente')),
-                                ],
+                                items: _statusItems,
                                 onChanged: (val) { if (val != null) setDialogState(() => status = val); },
                               ),
                             ),
@@ -253,10 +312,19 @@ class _AdminUsersTabState extends State<AdminUsersTab> {
                 ElevatedButton(
                   onPressed: () async {
                     showDialog(context: context, barrierDismissible: false, builder: (c) => const Center(child: CircularProgressIndicator()));
-                    final success = await _service.adminUpdateUser(
-                      userId: user['id'].toString(), name: nameC.text.trim(), username: usernameC.text.trim(),
-                      phone: phoneC.text.trim(), role: role, status: status, password: passwordC.text.trim(),
-                    );
+                    var success = false;
+                    String? error;
+                    try {
+                      success = await _service.adminUpdateUser(
+                        userId: user['id'].toString(), name: nameC.text.trim(), username: usernameC.text.trim(),
+                        phone: phoneC.text.trim(), role: role, status: status, password: passwordC.text.trim(),
+                        age: int.tryParse(ageC.text.trim()),
+                      );
+                    } on InsForgeRpcException catch (e) {
+                      error = e.message;
+                    } catch (e) {
+                      error = 'Error de conexion.';
+                    }
                     if (context.mounted) {
                       Navigator.pop(context);
                       Navigator.pop(context);
@@ -264,7 +332,9 @@ class _AdminUsersTabState extends State<AdminUsersTab> {
                         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Usuario actualizado.')));
                         _load();
                       } else {
-                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Error al actualizar.')));
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text(error ?? 'Error al actualizar.')),
+                        );
                       }
                     }
                   },
@@ -310,12 +380,19 @@ class _AdminUsersTabState extends State<AdminUsersTab> {
                     itemBuilder: (context, index) {
                       final user = _users[index];
                       final isPending = user['status'] == 'pending';
+                      final isRejected = user['status'] == 'rejected';
                       return Container(
                         margin: const EdgeInsets.only(bottom: 12),
                         decoration: BoxDecoration(
                           color: Colors.white,
                           borderRadius: BorderRadius.circular(15),
-                          border: Border.all(color: isPending ? Colors.orange.withValues(alpha: 0.5) : AppColors.cardBorder),
+                          border: Border.all(
+                            color: isPending
+                                ? Colors.orange.withValues(alpha: 0.5)
+                                : isRejected
+                                    ? Colors.red.withValues(alpha: 0.4)
+                                    : AppColors.cardBorder,
+                          ),
                           boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.02), blurRadius: 5, offset: const Offset(0, 2))],
                         ),
                         child: ListTile(
@@ -341,24 +418,47 @@ class _AdminUsersTabState extends State<AdminUsersTab> {
                                   child: const Text('Pendiente', style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)),
                                 ),
                               ],
+                              if (isRejected) ...[
+                                const SizedBox(width: 8),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                  decoration: BoxDecoration(color: Colors.red, borderRadius: BorderRadius.circular(10)),
+                                  child: const Text('Rechazado', style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)),
+                                ),
+                              ],
                             ],
                           ),
                           subtitle: Text('@${user['username'] ?? 'usuario'}', style: TextStyle(color: Colors.grey[600], fontSize: 14)),
                           trailing: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              if (isPending)
+                              if (isPending) ...[
                                 IconButton(
+                                  tooltip: 'Aprobar',
                                   icon: const Icon(Icons.check_circle, color: Colors.green),
-                                  onPressed: () async { await _service.adminUpdateUserStatus(user['id'], 'approved'); _load(); },
+                                  onPressed: () => _setStatus(user, 'approved'),
+                                ),
+                                IconButton(
+                                  tooltip: 'Rechazar',
+                                  icon: const Icon(Icons.cancel, color: Colors.red),
+                                  onPressed: () => _setStatus(user, 'rejected'),
+                                ),
+                              ],
+                              if (isRejected)
+                                IconButton(
+                                  tooltip: 'Aprobar',
+                                  icon: const Icon(Icons.check_circle, color: Colors.green),
+                                  onPressed: () => _setStatus(user, 'approved'),
                                 ),
                               IconButton(
+                                tooltip: 'Editar',
                                 icon: const Icon(Icons.edit, color: AppColors.primary),
                                 onPressed: () => _showEditUserDialog(user),
                               ),
                               IconButton(
+                                tooltip: 'Eliminar',
                                 icon: const Icon(Icons.delete, color: Colors.red),
-                                onPressed: () async { await _service.adminDeleteUser(user['id']); _load(); },
+                                onPressed: () => _confirmDelete(user),
                               ),
                             ],
                           ),
