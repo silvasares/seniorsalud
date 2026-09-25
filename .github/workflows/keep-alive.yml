@@ -1,0 +1,29 @@
+# El plan Free de InsForge pausa proyectos con 7 dias sin ninguna peticion.
+# Este workflow manda una peticion barata al backend una vez al dia para
+# reiniciar ese contador y evitar la pausa automatica.
+# Si el backend esta caido o pausado, el job falla y GitHub te avisa por email.
+name: Keep InsForge alive
+
+on:
+  schedule:
+    - cron: '0 12 * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping database API
+        run: |
+          curl -fsS --retry 5 --retry-delay 15 --max-time 60 \
+            -H "apikey: anon_23efa288ab9f4b85ae94a3ad53e05ba5b14b331d8ac5cb3b5bce7d4f5c70c681" \
+            -H "Authorization: Bearer anon_23efa288ab9f4b85ae94a3ad53e05ba5b14b331d8ac5cb3b5bce7d4f5c70c681" \
+            "https://espy9at2.us-east.insforge.app/api/database/records/users?select=id&limit=1"
+
+      - name: Ping database API (second call)
+        run: |
+          curl -fsS --retry 5 --retry-delay 15 --max-time 60 \
+            -H "apikey: anon_23efa288ab9f4b85ae94a3ad53e05ba5b14b331d8ac5cb3b5bce7d4f5c70c681" \
+            -H "Authorization: Bearer anon_23efa288ab9f4b85ae94a3ad53e05ba5b14b331d8ac5cb3b5bce7d4f5c70c681" \
+            "https://espy9at2.us-east.insforge.app/api/database/records/health_alerts?select=id&limit=1"
